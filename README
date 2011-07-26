@@ -1,0 +1,6 @@
+Twitter.awk
+July 2011. Scott Nicholas.
+
+When I learn a new language I usually write an IRC bot. I did that.
+Then I realized Twitter streaming API. That'd allow real-time interface
+like IRC.
