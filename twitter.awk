@@ -1,6 +1,9 @@
-#!/usr/bin/awk -f
+#!/usr/bin/nawk -f
 # twitter.awk: twitter client for streaming api.
 #
+# 30110726: tested in Solaris nawk. split() doesn't work on null 
+#           terminator. back to using substr(s, i, 1). also delete arr 
+#           needs a loop: for (i in arr) delete arr[i]
 # 20110726: Really getting somewhere. Started 3 days ago. Exported
 #           'sha1sum', 'base64', and 'urlencode' functions to allow
 #           use/test on files/stdin. sha1sum/base64 output mimics the
@@ -31,7 +34,6 @@ BEGIN {
 	oauth["method"]			= "GET"
 
 	## preliminary checks
-	check_required_cmds()
 	main()	# save global pollution!
 }
 
@@ -115,9 +117,9 @@ NR == 1 {
 ## main program functions
 function main(	header, ret)
 {
-	if (ARGV[1] ~ /(stream|live)/) {
+	if (ARGV[1] ~ /^(stream|live)$/) {
 		oauth["uri"] = "https://userstream.twitter.com/2/user.json"
-		__mode == "live"
+		__mode = "live"
 	} else if (ARGV[1] == "mentions") {
 		print "OK we'll test that out..."
 		__mode = "mentions"
@@ -133,21 +135,22 @@ function main(	header, ret)
 		__mode = "json"
 	} else if (ARGV[1] == "urlencode") {
 		__mode = "urlencode"
-		RS="\001"	#meh. should work for most text inputs.
 	} else if (ARGV[1] == "sha1sum") {
 		__mode = "sha1sum"
-		RS="\001"
 	} else if (ARGV[1] == "base64") {
 		__mode = "base64"
-		RS="\001"
 	} else {
 		show_usage()
 		exit
 	}
+
+	ARGC--
 	delete ARGV[1]	# it was a command, not a file for awk to open..
 
 	# the real program, eh
-	if (__mode == "live" || __mode == "mentions") {
+	if ((__mode == "live") || (__mode == "mentions")) {
+		check_required_cmds()
+
 		# not absolutely needed. but use awk's normal file processing
 		#  this way instead of a getline loop in BEGIN{} ... meh
 		if (mkfifo(ret) > 0)
@@ -178,6 +181,7 @@ function main(	header, ret)
 		}
 		print "Starting processing..."
 		ARGV[1] = http["pipe"]
+		ARGC = 2
 	}
 }
 
@@ -254,7 +258,8 @@ function twitter_new_user(credentials,
 		if (ok ~ /[Yy]/) break
 	}
 
-	delete params
+	for (i in params)
+		delete params[i]
 	params["oauth_verifier"] = "" pin
 	oauth["token"] = token["oauth_token"]
 	oauth["token_secret"] = token["oauth_token_secret"]
@@ -363,9 +368,8 @@ function html_entity_decode(str,
 function html_urlencode(str,
 	n, a, i, c, h, encoded)
 {
-	n = split(str, a, "")
-	for (i = 1; i <= n; i++) {
-		c = a[i]
+	for (i = 1; i <= length(str); i++) {
+		c = substr(str, i, 1)
 		# as per oauth1.0 specs
 		if (c ~ /[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._~-]/) {
 			encoded = encoded c
@@ -414,12 +418,12 @@ function json_add_element(arr, val, level, ordered, key,
 function json_to_array(json_str, arr,
 	i, a, n, backslash, quote, code, val, key, level, ordered)
 {
-	delete arr
+	for (i in arr)
+		delete arr[i]
 	level = 0;
-	n = split(json_str, a, "")
-	for (i = 1; i <= n; ++i)
+	for (i = 1; i <= length(json_str); ++i)
 	{
-		c = a[i]
+		c = substr(json_str, i, 1)
 		if (backslash) {
 			backslash = 0;
 			if (c == "u") {
@@ -603,9 +607,8 @@ function conv_str2hex(str,
 	n, a, i, hex)
 {
 	if (!__conv_init) conv_init()
-	n = split(str, a, "")
-	for (i = 1; i <= n; i++)
-		hex = hex __chr2hex[a[i]]
+	for (i = 1; i <= length(str); i++)
+		hex = hex __chr2hex[substr(str, i, 1)]
 	return hex
 }
 
@@ -662,13 +665,13 @@ function conv_unicode_to_utf8(hex, arr,
 ##########################################################################
 ##########################################################################
 ##########################################################################
-function check_required_cmds(	cmds, i, cmd, line)
+function check_required_cmds(	cmds, i, cmd, line, some_missing)
 {
 	## we need all of these...
 	cmds["date"] = cmds["curl"] = cmds["which"] = 0
 
 	for (i in cmds) cmd = cmd " " i
-	cmd = "which" cmd " 2>/dev/null; echo $?"
+	cmd = "which" cmd " 2>/dev/null"
 	while ((cmd | getline) > 0)
 	{
 		basename = $0
@@ -677,12 +680,18 @@ function check_required_cmds(	cmds, i, cmd, line)
 			cmds[basename] = $0
 	}
 	close(cmd)
-	if (basename != 0) {
-		print "***************************************************\n" \
-		      "* ERROR: Missing the following required programs: *"
-		for (i in cmds)
-			if (cmds[i] == 0)
-				printf("* %-47s *\n", i)
+	for (i in cmds)
+	{
+		if (cmds[i] == 0) {
+			if (!some_missing) {
+				some_missing = 1
+				print "***************************************************\n" \
+				      "* ERROR: Missing the following required programs: *"
+			}
+			printf("* %-47s *\n", i)
+		}
+	}
+	if (some_missing) {
 		print "***************************************************\n"
 		exit
 	}
@@ -749,11 +758,12 @@ function test_hmac(	test, text, key, out, hmac, i) {
 function sha1_xor(a, b,
 	c, d, n, i, res)
 {
-	split(a, c, "")
-	n = split(b, d, "")
+	n = length(a)
 	for (i = 1; i <= n; i++)
 	{
-		if ((c[i] != d[i]) && (c[i] == "1" || d[i] == "1"))
+		c = substr(a, i, 1)
+		d = substr(b, i, 1)
+		if ((c != d) && (c == "1" || d == "1"))
 			res = res "1"
 		else
 			res = res "0"
@@ -764,11 +774,12 @@ function sha1_xor(a, b,
 function sha1_and(a, b,
 	c, d, n, i, res)
 {
-	split(a, c, "")
-	n = split(b, d, "")
+	n = length(a)
 	for (i = 1; i <= n; i++)
 	{
-		if ((c[i] == d[i]) && (c[i] == "1"))
+		c = substr(a, i, 1)
+		d = substr(b, i, 1)
+		if ((c == d) && (c == "1"))
 			res = res "1"
 		else
 			res = res "0"
@@ -779,11 +790,12 @@ function sha1_and(a, b,
 function sha1_or(a, b,
 	c, d, n, i, res)
 {
-	split(a, c, "")
-	n = split(b, d, "")
+	n = length(a)
 	for (i = 1; i <= n; i++)
 	{
-		if ((c[i] == "1") || (d[i] == "1"))
+		c = substr(a, i, 1)
+		d = substr(b, i, 1)
+		if ((c == "1") || (d == "1"))
 			res = res "1"
 		else
 			res = res "0"
@@ -794,11 +806,12 @@ function sha1_or(a, b,
 function sha1_add(a, b,
 	c, d, n, i, carry, sum, res)
 {
-	split(a, c, "")
-	n = split(b, d, "")
+	n = length(a)
 	for (i = n; i > 0; i--)
 	{
-		sum = carry + c[i] + d[i]
+		c = substr(a, i, 1)
+		d = substr(b, i, 1)
+		sum = carry + c + d
 		if (sum == 2) { carry = 1; sum = 0 }
 		else if (sum == 3) { carry = 1; sum = 1 }
 		else { carry = 0; }
@@ -808,12 +821,12 @@ function sha1_add(a, b,
 }
 
 function sha1_not(a,
-	c, n, i, res)
+	n, i, res)
 {
-	n = split(a, c, "")
+	n = length(a)
 	for (i = 1; i <= n; i++)
 	{
-		if (c[i] == "0")
+		if (substr(a, i, 1) == "0")
 			res = res "1"
 		else
 			res = res "0"
