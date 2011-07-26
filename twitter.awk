@@ -1,8 +1,8 @@
 #!/usr/bin/nawk -f
 # twitter.awk: twitter client for streaming api.
 #
-# 30110726: tested in Solaris nawk. split() doesn't work on null 
-#           terminator. back to using substr(s, i, 1). also delete arr 
+# 30110726: tested in Solaris nawk. split() doesn't work on null
+#           terminator. back to using substr(s, i, 1). also delete arr
 #           needs a loop: for (i in arr) delete arr[i]
 # 20110726: Really getting somewhere. Started 3 days ago. Exported
 #           'sha1sum', 'base64', and 'urlencode' functions to allow
@@ -27,11 +27,12 @@
 # july 2011. scott nicholas <neutronscott@scottn.us>
 
 BEGIN {
-	oauth["consumer_key"]		= "VHwzHGBDO4stWqGMgz0e0g"
-	oauth["consumer_secret"]	= ""
-	oauth["token"]			= "339290761-lkveKXFJBEEaz9qBoN62ftHA3FuRXWXABMAHLLaG"
-	oauth["token_secret"]		= ""
-	oauth["method"]			= "GET"
+	__configfile	= "twitter.conf"
+
+	# I noticed 'for (i in arr)' segfaults Solaris nawk
+	# if no array is passed, and length(arr) is illegal.
+	# this is my workaround..
+	__empty_arr[""] = ""
 
 	## preliminary checks
 	main()	# save global pollution!
@@ -149,6 +150,7 @@ function main(	header, ret)
 
 	# the real program, eh
 	if ((__mode == "live") || (__mode == "mentions")) {
+		config_read()
 		check_required_cmds()
 
 		# not absolutely needed. but use awk's normal file processing
@@ -161,8 +163,9 @@ function main(	header, ret)
 		http["pipe"] = ret[0]
 
 		print "Starting feed..."
-		header = oauth_header(oauth)
-		http["cmd"] = http_make_cmd(oauth, header, "", http["pipe"])
+		header = oauth_header(oauth, __empty_arr)
+		http["cmd"] = http_make_cmd(oauth, header, __empty_arr, \
+		              http["pipe"])
 
 		# kick off http agent // stdin = headers.
 		# pipe = content. (awk processes pipe as normal file)
@@ -200,6 +203,23 @@ function show_usage()
 		"urlencode     - urlencodes stdin.\n" \
 		"sha1sum       - same as shell utility\n" \
 		"base64        - same as shell utility (encode only)\n"
+}
+
+function config_read()
+{
+	while ((getline < __configfile) > 0)
+	{
+		if ($0 ~ /^#/)		# skip comment lines
+			continue
+		if ($1 == "consumer_key")
+			oauth["consumer_key"] = $2
+		else if ($1 == "consumer_secret")
+			oauth["consumer_secret"] = $2
+		else if ($1 == "token")
+			oauth["token"] = $2
+		else if ($1 == "token_secret")
+			oauth["token_secret"] = $2
+	}
 }
 
 ###############################################################################
@@ -313,7 +333,7 @@ function twitter_verify_user(credentials,
 	oauth["method"] = "GET"
 	oauth["uri"] = "http://api.twitter.com/1/account/verify_credentials.json"
 
-	header = oauth_header(oauth)
+	header = oauth_header(oauth, __empty_arr)
 	curl = http_make_cmd(oauth, header)
 	while ((curl | getline) > 0)
 	{
@@ -388,7 +408,7 @@ function http_make_cmd(credentials, header, params, pipe,
 {
 	# headers go to stdout, content goes to stdout or optional pipe
 	curl = "exec curl -s -D - -N '" credentials["uri"] "' -H '" header "'"
-	if (length(params)) {
+	if (params[""] != "") {		# empty/optional workaround
 		for (i in params)
 			params_str = (params_str ? params_str "&" : "") html_urlencode(i) "=" html_urlencode(params[i])
 		curl = curl " -d '" params_str "'"
@@ -471,7 +491,8 @@ function json_to_array(json_str, arr,
 ##########################################################################
 ##########################################################################
 function oauth_header(credentials, params,
-	bs, cmd, str, i, c, params_str, base_string, key, signature, header)
+	bs, cmd, str, i, c, params_str, base_string, key,
+	signature, header, method)
 {
 	## first we need the base string
 
@@ -481,8 +502,7 @@ function oauth_header(credentials, params,
 	bs["oauth_token"] = credentials["token"]
 	bs["oauth_signature_method"] = "HMAC-SHA1"
 
-	if (credentials["timestamp"] == "")
-	{
+	if (credentials["timestamp"] == "") {
 		cmd = "date +%s"
 		cmd | getline str
 		close(cmd)
@@ -499,10 +519,15 @@ function oauth_header(credentials, params,
 	} else {
 		bs["oauth_nonce"] = credentials["nonce"]
 	}
+	if (credentials["method"] == "")
+		method = "GET"
+	else
+		method = credentials["method"]
 
 	# merge with request parameters
-	for (i in params)
-		bs[i] = params[i]
+	if (params[""] != "")	# empty/optional array workaround for nawk
+		for (i in params)
+			bs[i] = params[i]
 
 	# oops.
 	for (i in bs)
@@ -511,14 +536,18 @@ function oauth_header(credentials, params,
 	# must be normalized so our calculations match servers
 	c = quicksort_indices(bs, idx)
 	for (i = 1; i <= c; i++)
-		params_str = params_str idx[i] "=" bs[idx[i]] ((i != c) ? "&" : "")
+		params_str = params_str idx[i] "=" bs[idx[i]] \
+		             ((i != c) ? "&" : "")
 
 	# put it all together
-	base_string = credentials["method"] "&" html_urlencode(credentials["uri"]) "&" html_urlencode(params_str)
+	base_string = method "&" html_urlencode(credentials["uri"]) "&" \
+	              html_urlencode(params_str)
 
 	## then we need a signature
-	key = html_urlencode(credentials["consumer_secret"]) "&" html_urlencode(credentials["token_secret"])
-#	openssl = base64_sha1_hmac(key, base_string)
+	key = html_urlencode(credentials["consumer_secret"]) "&" \
+	      html_urlencode(credentials["token_secret"])
+
+#	signature = base64_sha1_hmac(key, base_string)
 	signature = conv_base64(sha1_hmac( \
 		    conv_hex2bin(conv_str2hex(key)), \
 		    conv_hex2bin(conv_str2hex(base_string)) ))
