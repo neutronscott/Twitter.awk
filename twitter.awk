@@ -32,10 +32,16 @@ BEGIN {
 	# I noticed 'for (i in arr)' segfaults Solaris nawk
 	# if no array is passed, and length(arr) is illegal.
 	# this is my workaround..
-	__empty_arr[""] = ""
+	__empty_arr[""] = "__empty_arr"
 
 	## preliminary checks
 	main()	# save global pollution!
+}
+
+function verbose_print(level, stuff)
+{
+	if (__verbose_level > level)
+		print stuff
 }
 
 ## normal processing actions
@@ -118,6 +124,9 @@ NR == 1 {
 ## main program functions
 function main(	header, ret)
 {
+	# FIXME: we need this early for now. sucks if using a mini-utility ...
+	config_read()
+
 	if (ARGV[1] ~ /^(stream|live)$/) {
 		oauth["uri"] = "https://userstream.twitter.com/2/user.json"
 		__mode = "live"
@@ -150,7 +159,6 @@ function main(	header, ret)
 
 	# the real program, eh
 	if ((__mode == "live") || (__mode == "mentions")) {
-		config_read()
 		check_required_cmds()
 
 		# not absolutely needed. but use awk's normal file processing
@@ -219,7 +227,33 @@ function config_read()
 			oauth["token"] = $2
 		else if ($1 == "token_secret")
 			oauth["token_secret"] = $2
+		else if ($1 == "verbose") {	# "verbose" or "verbose level"?
+			if (NF > 1)
+				__verbose_level = $NF
+			else
+				__verbose_level = 1
+		}
 	}
+	close(__configfile)
+}
+
+function config_replace_token(token, token_secret,
+	buffer, i, n)
+{
+	while ((getline < __configfile) > 0)
+		buf[++i] = $0
+	close(__configfile)
+	n = i;
+	for (i = 1; i <= n; i++)
+	{
+		if (tolower(buf[i]) ~ /^token/)
+			print "#" buf[i] > __configfile
+		else
+			print buf[i] > __configfile
+	}
+	print "token\t\t" token > __configfile
+	print "token_secret\t" token_secret > __configfile
+	close(__configfile)
 }
 
 ###############################################################################
@@ -253,7 +287,7 @@ function twitter_new_user(credentials,
 
 	## first request_token
 	oauth["method"] = "POST"
-	oauth["uri"] = "http://api.twitter.com/oauth/request_token"
+	oauth["uri"] = "https://api.twitter.com/oauth/request_token"
 
 	params["oauth_callback"] = "oob"
 
@@ -261,6 +295,7 @@ function twitter_new_user(credentials,
 	curl = http_make_cmd(oauth, header, params)
 	while ((curl | getline) > 0)
 	{
+		print $0
 		gsub("\r", "")
 		if (length($0) == 0) content = 1
 		else if (content) token_str = token_str $0
@@ -281,8 +316,8 @@ function twitter_new_user(credentials,
 	for (i in params)
 		delete params[i]
 	params["oauth_verifier"] = "" pin
-	oauth["token"] = token["oauth_token"]
-	oauth["token_secret"] = token["oauth_token_secret"]
+	oauth["token"]           = token["oauth_token"]
+	oauth["token_secret"]    = token["oauth_token_secret"]
 
 	twitter_auth_user(oauth, params)
 }
@@ -322,8 +357,9 @@ function twitter_auth_user(credentials, params,
 	for (i = 1; i <= n; i += 2)
 	{
 		token[a[i]] = a[i+1]
-		printf("[%s]=[%s]\n", a[i], a[i+1])
+		verbose_print(2, "[" a[i] "]=[" a[i+1] "]")
 	}
+	config_replace_token(token["oauth_token"], token["oauth_token_secret"])
 }
 
 function twitter_verify_user(credentials,
@@ -334,7 +370,7 @@ function twitter_verify_user(credentials,
 	oauth["uri"] = "http://api.twitter.com/1/account/verify_credentials.json"
 
 	header = oauth_header(oauth, __empty_arr)
-	curl = http_make_cmd(oauth, header)
+	curl = http_make_cmd(oauth, header, __empty_arr)
 	while ((curl | getline) > 0)
 	{
 		gsub("\r", "")
@@ -404,20 +440,20 @@ function html_urlencode(str,
 
 function http_make_cmd(credentials, header, params, pipe,
 	params_str)
-
 {
 	# headers go to stdout, content goes to stdout or optional pipe
 	curl = "exec curl -s -D - -N '" credentials["uri"] "' -H '" header "'"
-	if (params[""] != "") {		# empty/optional workaround
+	if (params[""] != "__empty_arr") {	# empty/optional workaround
 		for (i in params)
 			params_str = (params_str ? params_str "&" : "") html_urlencode(i) "=" html_urlencode(params[i])
 		curl = curl " -d '" params_str "'"
 	}
 	if (length(pipe))
 		curl = curl " -o " pipe
-	else
-		curl = curl " -o -"
+#	else
+#		curl = curl " -o -"
 
+	verbose_print(1, "HTTP command: [" curl "]")
 	return curl
 }
 
@@ -497,27 +533,28 @@ function oauth_header(credentials, params,
 	## first we need the base string
 
 	# populate parameters used to calculate base string
-	bs["oauth_version"] = "1.0"
-	bs["oauth_consumer_key"] = credentials["consumer_key"]
-	bs["oauth_token"] = credentials["token"]
-	bs["oauth_signature_method"] = "HMAC-SHA1"
+	bs["oauth_version"]		= "1.0"
+	bs["oauth_consumer_key"]	= credentials["consumer_key"]
+	bs["oauth_signature_method"]	= "HMAC-SHA1"
 
+	if (credentials["token"])
+		bs["oauth_token"]	= credentials["token"]
 	if (credentials["timestamp"] == "") {
 		cmd = "date +%s"
 		cmd | getline str
 		close(cmd)
-		bs["oauth_timestamp"] = "" str
+		bs["oauth_timestamp"]	= "" str
 	} else {
-		bs["oauth_timestamp"] = credentials["timestamp"]
+		bs["oauth_timestamp"]	= credentials["timestamp"]
 	}
 	if (credentials["nonce"] == "") {
 		cmd = "date +%s.%N"
 		cmd | getline str
 		str = tolower(conv_bin2hex(sha1sum(str)))
-		bs["oauth_nonce"] = str
+		bs["oauth_nonce"]	= str
 		close(cmd)
 	} else {
-		bs["oauth_nonce"] = credentials["nonce"]
+		bs["oauth_nonce"]	= credentials["nonce"]
 	}
 	if (credentials["method"] == "")
 		method = "GET"
@@ -525,7 +562,8 @@ function oauth_header(credentials, params,
 		method = credentials["method"]
 
 	# merge with request parameters
-	if (params[""] != "")	# empty/optional array workaround for nawk
+	# empty/optional array workaround for nawk
+	if (params[""] != "__empty_arr")
 		for (i in params)
 			bs[i] = params[i]
 
@@ -547,21 +585,26 @@ function oauth_header(credentials, params,
 	key = html_urlencode(credentials["consumer_secret"]) "&" \
 	      html_urlencode(credentials["token_secret"])
 
-#	signature = base64_sha1_hmac(key, base_string)
 	signature = conv_base64(sha1_hmac( \
 		    conv_hex2bin(conv_str2hex(key)), \
 		    conv_hex2bin(conv_str2hex(base_string)) ))
 
+	verbose_print(1, "sha1_hmac('" key "',\n\t'" base_string "') = " \
+		signature)
+
 	## concat a header out of all this
 	header = "Authorization: OAuth "
 	header = header "oauth_consumer_key=\"" html_urlencode(bs["oauth_consumer_key"]) "\", "
-	header = header "oauth_token=\"" html_urlencode(bs["oauth_token"]) "\", "
+	if (credentials["token"])
+		header = header "oauth_token=\"" \
+		         html_urlencode(bs["oauth_token"]) "\", "
 	header = header "oauth_signature_method=\"" html_urlencode(bs["oauth_signature_method"]) "\", "
 	header = header "oauth_signature=\"" html_urlencode(signature) "\", "
 	header = header "oauth_timestamp=\"" html_urlencode(bs["oauth_timestamp"]) "\", "
 	header = header "oauth_nonce=\"" html_urlencode(bs["oauth_nonce"]) "\", "
 	header = header "oauth_version=\"" html_urlencode(bs["oauth_version"]) "\""
 
+	verbose_print(1, header)
 	return header
 }
 
@@ -602,24 +645,26 @@ function conv_init(	i, j, c, h, a)
 
 #input is binary string as well...
 function conv_base64(t,
-	r, i, b64, b, res)
+	i, b64, b, res)
 {
 	b64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
-	# pad to multiple of 24... cos each 3 char -> 4 char. 8*3 = 24
-	r = (length(t) % 24)
-	if (r > 0)
-		for (i = 1; i <= (24 - r); i++)
-			t = t "0"
+
+	# pad input. takes 6 bits to make 64-positions.
+	while (length(t) % 6)
+		t = t "0"
 
 	for (i = 1; i < length(t); i += 6) {
 		d  = 16 * __bin2dec["00" substr(t, i, 2)] + \
 		     __bin2dec[substr(t, i+2, 4)]
 		b = substr(b64, d + 1, 1)
-		# wouldnt need this if did 24-bit at time... eh
-		if ((length(t) - i) <= 16 && b == "A")
-			b = "="
 		res = res b
 	}
+
+	# pad out. end with '='. every 3 char transforms to 4, so output
+	# must be multiple of 4.
+	while (length(res) % 4)
+		res = res "="
+
 	return res
 }
 
