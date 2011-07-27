@@ -46,7 +46,8 @@ function verbose_print(level, stuff)
 
 ## normal processing actions
 # first the little helper/tester modes
-__mode == "urlencode" { print html_urlencode($0); next }
+__mode == "urlencode" { print html_urlencode($0);     next }
+__mode == "entities"  { print html_entity_decode($0); next }
 __mode == "sha1sum"   {
 	print tolower(conv_bin2hex(sha1sum($0))) "  " FILENAME
 	next
@@ -145,6 +146,8 @@ function main(	header, ret)
 		__mode = "json"
 	} else if (ARGV[1] == "urlencode") {
 		__mode = "urlencode"
+	} else if (ARGV[1] == "entities") {
+		__mode = "entities"
 	} else if (ARGV[1] == "sha1sum") {
 		__mode = "sha1sum"
 	} else if (ARGV[1] == "base64") {
@@ -209,6 +212,7 @@ function show_usage()
 		"Operations on stdin or optional file:\n" \
 		"json          - parse and dump a json file\n" \
 		"urlencode     - urlencodes stdin.\n" \
+		"entities      - test html_entity_decode()\n" \
 		"sha1sum       - same as shell utility\n" \
 		"base64        - same as shell utility (encode only)\n"
 }
@@ -232,13 +236,15 @@ function config_read()
 				__verbose_level = $NF
 			else
 				__verbose_level = 1
+		} else if ($1 == "html") {
+			__html_entity[tolower($2)] = sprintf("%04x", $3)
 		}
 	}
 	close(__configfile)
 }
 
 function config_replace_token(token, token_secret,
-	buffer, i, n)
+	buffer, i, n, c)
 {
 	while ((getline < __configfile) > 0)
 		buf[++i] = $0
@@ -246,13 +252,20 @@ function config_replace_token(token, token_secret,
 	n = i;
 	for (i = 1; i <= n; i++)
 	{
-		if (tolower(buf[i]) ~ /^token/)
+		if (tolower(buf[i]) ~ /^token/) {
 			print "#" buf[i] > __configfile
-		else
+			if (++c == 2) {		# keep new under old.
+				print "token\t\t" token > __configfile
+				print "token_secret\t" token_secret > __configfile
+			}
+		} else
 			print buf[i] > __configfile
 	}
-	print "token\t\t" token > __configfile
-	print "token_secret\t" token_secret > __configfile
+	# in case there was none..
+	if (c < 2) {
+		print "token\t\t" token > __configfile
+		print "token_secret\t" token_secret > __configfile
+	}
 	close(__configfile)
 }
 
@@ -392,23 +405,40 @@ function twitter_verify_user(credentials,
 ###############################################################################
 ###############################################################################
 function html_entity_decode(str,
-	i, start, result, c)
+	i, start, result, c, hex)
 {
 	for (i = start = 1; i = match(substr(str, start), "&[^;]+;"); )
 	{
 		# add stuff that is previous-to-match
 		result = result substr(str, start, i - 1)
 		start += i - 1
-		entity = substr(str, start + 1, RLENGTH - 2)
+		entity = tolower(substr(str, start + 1, RLENGTH - 2))
 
-		if (entity == /(quot|#34)/) c = "\""
-		else if (entity ~ /(amp|#38)/) c = "&"
-		else if (entity ~ /(apos|#39)/) c = "'"
-		else if (entity ~ /(lt|#60)/) c = "<"
-		else if (entity ~ /(gt|#62)/) c = ">"
-		else if (entity ~ /(nbsp|#160)/) c = " "
-		else if (entity == "hearts") c = "<3"
-		else c = "[H:" entity "]"
+		# easy speezy if it's already a numeric, no lookup-table! :D
+		if (entity ~ /^#/) {
+			if (substr(entity, 2, 1) == "x")	#hex
+			{
+				hex = substr(entity, 3)
+				while (length(hex) < 4)
+					hex = "0" hex
+				c = conv_unicode_to_utf8(hex)
+			} else {
+				c = conv_unicode_to_utf8( \
+					sprintf("%04x", 0+substr(entity, 2)))
+			}
+		# hard-code the basic and essential ones [XML 1.0]
+		} else if (entity == "quot")	c = "\""
+		else if (entity == "amp")	c = "&"
+		else if (entity == "apos")	c = "'"
+		else if (entity == "lt")	c = "<"
+		else if (entity == "gt")	c = ">"
+		else if (entity == "nbsp")	c = " "
+		else if (entity in __html_entity) {
+			c = conv_unicode_to_utf8(__html_entity[entity])
+		} else {
+			# put it back together. meh.
+			c = "&" entity ";"
+		}
 
 		result = result c
 		start += RLENGTH

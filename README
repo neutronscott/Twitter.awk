@@ -4,3 +4,6 @@ July 2011. Scott Nicholas.
 When I learn a new language I usually write an IRC bot. I did that.
 Then I realized Twitter streaming API. That'd allow real-time interface
 like IRC.
+
+The crazy part was doing HMAC-SHA1 myself in nawk. gawk has bitwise functions,
+nawk does not. Thus, I made functions to operate on binary strings. :D
