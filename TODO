@@ -2,8 +2,6 @@
 	* CREATE CONF FILE for TOKENS and SAVE NEW ONES there
 	  "use openssl" // "use wchartable"
 	* test "printf c | od", use it instead of WCHAR table [conf option]
-	* create table __html_entities["name"] = chr
-	  don't need to store #xxxx ....
 	* need function to read_header_status(), return HTTP status code.
 	  stop at \n\n
 	* put oauth_header() in http_make_cmd ?
