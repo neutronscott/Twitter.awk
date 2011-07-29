@@ -76,12 +76,37 @@ __mode == "json"      {
 # rest is http connections. do this first.
 #   can't believe i'm bothering with openssl s_client, need to check
 #   length, it's possible (not with twitter json though afaik) to extend >1 line
-__chunked && __chunked_zero { __chunked_zero = 0; next } # skip entirely
-__chunked && !__chunked_len { __chunked_len = $0; next } # skip entirely...?
-__chunked && __chunked_len  { __chunked_zero = 1 }# content on these line(s)
-1 {	gsub("\r", "");
-	verbose_print(3, "HTTP: " (__verbose_level>= 4&&length($0)>67)?$0 :\
-	  substr($0, 1, 32) "..." substr($0, length($0) - 32))
+1 { gsub("\r", "") }
+__chunked {
+	content = ""
+	c_length = j = c_read = __chunked_overread = 0
+
+	# maybe needa add conv_hex2dec now eh?
+	for (i = length($0); i > 0; i--)
+		c_length = c_length + ((16^(j++)) * __hex2dec[toupper(substr($0, i, 1))])
+
+	printf("Chunk-Length: [hex:%s] [dec:%d]\n", $0, c_length)
+	# content read, and contents length. remember \n is missing, +1
+	while (c_read < c_length) {
+		getline line
+		c_read = c_read + 1 + length(line)
+		if (c_read > c_length) __chunked_overread = c_read - c_length
+		printf("c_read = %d/%d [overread:%d]\n", c_read, c_length, \
+			__chunked_overread)
+		content = content line "\n"
+		if (__chunked_overread)
+		{
+			printf("OVER: %s\n", substr(content, c_length))
+		}
+	}
+	getline line		# [size]CRLF[data]CRLF.
+	print ""
+	$0 = content
+	gsub("\r", "")
+}
+1 {
+	verbose_print(3, "HTTP: " ((__verbose_level>= 4||length($0)<67) ? $0 : \
+	  (substr($0, 1, 32) "..." substr($0, length($0) - 32))))
 
 }
 __mode == "mentions" {
@@ -531,7 +556,7 @@ function http_open(credentials, header, params, fifo,
 			print "" | cmd	# kick it off
 			h_cmd = "while read A && [ \"${#A}\" -gt 2 ]; do echo \"${A}\"; done < " fifo
 			while ((h_cmd | getline) > 0 && http_get_header(cmd)) {
-				if ($0 ~ /chunked/) __chunked = 1
+				if ($0 ~ /chunked/) { __chunked = 1 }
 			}
 			verbose_print(3, "close header helper.")
 			close(h_cmd)	# awk reopens as ARGV[1] for normal procsesing
@@ -540,7 +565,7 @@ function http_open(credentials, header, params, fifo,
 			# i'll have to pretty this up later.
 			# same code 3 times? ick
 			while ((cmd | getline) > 0 && http_get_header(cmd)) {
-				if ($0 ~ /chunked/) __chunked = 1
+				if ($0 ~ /chunked/) { __chunked = 1 }
 			}
 		}
 	} else {
@@ -727,7 +752,7 @@ function conv_init(	i, j, c, h, a)
 		__hex2bin[__hextab[i]] = __bintab[i]
 		__bin2dec[__bintab[i]] = i
 		__bin2hex[__bintab[i]] = __hextab[i]
-#		__hex2dec[__hextab[i]] = i
+		__hex2dec[__hextab[i]] = i
 	}
 	if (length(conv_unicode_to_utf8("FEFF")) == 1) {
 		print	"********************************************************\n" \
