@@ -1,3 +1,7 @@
+20110728
+	* almost works with openssl s_client... just gotta get headers
+	  off before going into processing hmmmmmm
+
 20110726
 	* CREATE CONF FILE for TOKENS and SAVE NEW ONES there
 	  "use openssl" // "use wchartable"

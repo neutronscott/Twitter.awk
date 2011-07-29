@@ -40,7 +40,7 @@ BEGIN {
 
 function verbose_print(level, stuff)
 {
-	if (__verbose_level > level)
+	if (__verbose_level >= level)
 		print stuff
 }
 
@@ -74,8 +74,17 @@ __mode == "json"      {
 }
 
 # rest is http connections. do this first.
-1 { gsub("\r", "") }
-__mode == "__mentions" {
+#   can't believe i'm bothering with openssl s_client, need to check
+#   length, it's possible (not with twitter json though afaik) to extend >1 line
+__chunked && __chunked_zero { __chunked_zero = 0; next } # skip entirely
+__chunked && !__chunked_len { __chunked_len = $0; next } # skip entirely...?
+__chunked && __chunked_len  { __chunked_zero = 1 }# content on these line(s)
+1 {	gsub("\r", "");
+	verbose_print(3, "HTTP: " (__verbose_level>= 4&&length($0)>67)?$0 :\
+	  substr($0, 1, 32) "..." substr($0, length($0) - 32))
+
+}
+__mode == "mentions" {
 	json_to_array($0, json)
 
 	# iterate fake-multi-demensional array, grab each mention separate
@@ -134,7 +143,7 @@ function main(	header, ret)
 	} else if (ARGV[1] == "mentions") {
 		print "OK we'll test that out..."
 		__mode = "mentions"
-		oauth["uri"] = "http://api.twitter.com/1/statuses/mentions.json"
+		oauth["uri"] = "https://api.twitter.com/1/statuses/mentions.json"
 	} else if (ARGV[1] == "whoami") {
 		twitter_verify_user(oauth)
 		exit
@@ -171,39 +180,27 @@ function main(	header, ret)
 			print "Error creating fifo ..."
 			exit
 		}
-		http["pipe"] = ret[0]
+		http["fifo"] = ret[0]
 
 		print "Starting feed..."
 		header = oauth_header(oauth, __empty_arr)
-		http["cmd"] = http_make_cmd(oauth, header, __empty_arr, \
-		              http["pipe"])
-
-		# kick off http agent // stdin = headers.
-		# pipe = content. (awk processes pipe as normal file)
-		while ((http["cmd"] | getline) > 0)
-		{
-			gsub("\r", "")
-			if (length($0) == 0) break	# headers done.
-			if ($1 ~ /^HTTP/) {
-				if ($2 == "200") {
-					print "Connection successful!"
-				} else {
-					printf("ERROR!\n%s\n", $0)
-					exit
-				}
-			}
+		http["cmd"] = http_open(oauth, header, __empty_arr, \
+		              http["fifo"])
+		if (http["cmd"] ~ /^ERROR/) {
+			print http["cmd"]
+			exit
 		}
 		print "Starting processing..."
-		ARGV[1] = http["pipe"]
+		ARGV[1] = http["fifo"]
 		ARGC = 2
 	}
 }
 
 function show_usage()
 {
-	print	"Usage: twitter.awk <option>\n" \
+	print	"Usage: twitter.awk <mode>\n" \
 		"\n" \
-		"Option MUST be ONE of the following:\n" \
+		"Mode MUST be ONE of the following:\n" \
 		"stream|live   - streaming api\n" \
 		"newuser       - get tokens for user\n" \
 		"whoami        - show information about user who owns token\n" \
@@ -213,8 +210,8 @@ function show_usage()
 		"json          - parse and dump a json file\n" \
 		"urlencode     - urlencodes stdin.\n" \
 		"entities      - test html_entity_decode()\n" \
-		"sha1sum       - same as shell utility\n" \
-		"base64        - same as shell utility (encode only)\n"
+		"sha1sum       - calculate sha-1 hash\n" \
+		"base64        - base64 encode\n"
 }
 
 function config_read()
@@ -238,6 +235,8 @@ function config_read()
 				__verbose_level = 1
 		} else if ($1 == "html") {
 			__html_entity[tolower($2)] = sprintf("%04x", $3)
+		} else if ($1 == "use") {
+			__conf["cmd", "http"] = $2
 		}
 	}
 	close(__configfile)
@@ -273,25 +272,29 @@ function config_replace_token(token, token_secret,
 ###############################################################################
 ###############################################################################
 function twitter_update_status(credentials, status,
-	i, oauth, params, header, curl)
+	i, oauth, params, header, http)
 {
 	for (i in credentials) oauth[i] = credentials[i]
 	oauth["method"] = "POST"
-	oauth["uri"] = "http://api.twitter.com/1/statuses/update.json"
+	oauth["uri"] = "https://api.twitter.com/1/statuses/update.json"
 
 	params["status"] = status
 
 	header = oauth_header(oauth, params)
-	curl = http_make_cmd(oauth, header, params)
-	while ((curl | getline) > 0)
-	{
-#		print "curl: " $0
+	http = http_open(oauth, header, params)
+	if (http ~ /^ERROR/) {
+		print "update_status: " http
+		return
 	}
-	close(curl)
+	while ((http | getline) > 0)
+	{
+#		print "http: " $0
+	}
+	close(http)
 }
 
 function twitter_new_user(credentials,
-	i, oauth, header, params, curl, token, content, str, a, b,
+	i, oauth, header, params, http, token, content, str, a, b,
 	pin, ok)
 {
 	## only need our info. we're getting client infos..
@@ -305,15 +308,19 @@ function twitter_new_user(credentials,
 	params["oauth_callback"] = "oob"
 
 	header = oauth_header(oauth, params)
-	curl = http_make_cmd(oauth, header, params)
-	while ((curl | getline) > 0)
-	{
-		print $0
-		gsub("\r", "")
-		if (length($0) == 0) content = 1
-		else if (content) token_str = token_str $0
+	http = http_open(oauth, header, params)
+	if (http ~ /^ERROR/) {
+		print http
+		return
 	}
-	close(curl)
+	while ((http | getline) > 0)
+	{
+		gsub("\r", "")
+		verbose_print(1, $0)
+		token_str = token_str $0
+	}
+	close(http)
+
 	n = split(token_str, a, "(&|=)")
 	for (i = 1; i <= n; i += 2)
 		token[a[i]] = a[i+1]
@@ -345,7 +352,7 @@ function prompt(p,
 
 # params["oauth_verifier"] = PIN
 function twitter_auth_user(credentials, params,
-	i, oauth, header, curl, token_str, token, content, str, a, n)
+	i, oauth, header, http, token_str, token, content, str, a, n)
 {
 	oauth["consumer_key"] = credentials["consumer_key"]
 	oauth["consumer_secret"] = credentials["consumer_secret"]
@@ -357,14 +364,17 @@ function twitter_auth_user(credentials, params,
 	oauth["uri"] = "https://api.twitter.com/oauth/access_token"
 
 	header = oauth_header(oauth, params)
-	curl = http_make_cmd(oauth, header, params)
-	while ((curl | getline) > 0)
+	http = http_open(oauth, header, params)
+	if (http ~ /^ERROR/) {
+		print http
+		return
+	}
+	while ((http | getline) > 0)
 	{
 		gsub("\r", "")
-		if (length($0) == 0) content = 1
-		else if (content) token_str = token_str $0
+		token_str = token_str $0
 	}
-	close(curl)
+	close(http)
 
 	n = split(token_str, a, "(&|=)")
 	for (i = 1; i <= n; i += 2)
@@ -376,29 +386,29 @@ function twitter_auth_user(credentials, params,
 }
 
 function twitter_verify_user(credentials,
-	i, oauth, header, curl, content, json)
+	i, oauth, header, http, content, json)
 {
 	for (i in credentials) oauth[i] = credentials[i]
 	oauth["method"] = "GET"
-	oauth["uri"] = "http://api.twitter.com/1/account/verify_credentials.json"
+	oauth["uri"] = "https://api.twitter.com/1/account/verify_credentials.json"
 
 	header = oauth_header(oauth, __empty_arr)
-	curl = http_make_cmd(oauth, header, __empty_arr)
-	while ((curl | getline) > 0)
+	http = http_open(oauth, header, __empty_arr)
+	if (http ~ /^ERROR/)
 	{
-		gsub("\r", "")
-		if ($1 ~ /^HTTP/ && ($2 != "200")) { print; exit }
-		else if (length($0) == 0) content = 1
-		else if (content) {
-			json_to_array($0, json)
-			printf("Screen name: %s  [id:%d]\nDescription: %s\n\n", \
-			       json["screen_name"], json["id"], json["description"])
-			printf("Statuses: %d\n", json["statuses_count"])
-			printf("Following: %d Followers: %d\n", \
-			       json["friends_count"], json["followers_count"])
-		}
+		print http
+		return
 	}
-	close(curl)
+	while ((http | getline) > 0)
+	{
+		json_to_array($0, json)
+		printf("Screen name: %s  [id:%d]\nDescription: %s\n\n", \
+		       json["screen_name"], json["id"], json["description"])
+		printf("Statuses: %d\n", json["statuses_count"])
+		printf("Following: %d Followers: %d\n", \
+		       json["friends_count"], json["followers_count"])
+	}
+	close(http)
 }
 
 ###############################################################################
@@ -468,23 +478,86 @@ function html_urlencode(str,
 	return encoded
 }
 
-function http_make_cmd(credentials, header, params, pipe,
-	params_str)
+function http_get_header(cmd)
 {
-	# headers go to stdout, content goes to stdout or optional pipe
-	curl = "exec curl -s -D - -N '" credentials["uri"] "' -H '" header "'"
+	gsub("\r", "")
+	verbose_print(2, "HTTP-Header[" length($0) "]: " $0)
+	if ($0 ~ /^HTTP/) {
+		verbose_print(1, $0)
+		if ($2 != "200") {
+			close(cmd)
+			return "ERROR " $0
+		}
+	}
+	if (length($0) == 0) return 0
+	return 1
+}
+
+function http_open(credentials, header, params, fifo,
+	params_str, cmd, i, host, path, h_cmd)
+{
 	if (params[""] != "__empty_arr") {	# empty/optional workaround
 		for (i in params)
-			params_str = (params_str ? params_str "&" : "") html_urlencode(i) "=" html_urlencode(params[i])
-		curl = curl " -d '" params_str "'"
+			params_str = (params_str ? params_str "&" : "") \
+				html_urlencode(i) "=" html_urlencode(params[i])
 	}
-	if (length(pipe))
-		curl = curl " -o " pipe
-#	else
-#		curl = curl " -o -"
 
-	verbose_print(1, "HTTP command: [" curl "]")
-	return curl
+	if (__conf["cmd", "http"] == "openssl")
+	{
+		# oh this sucks. basically gotta make a simple http client :P
+		i = match(credentials["uri"], "://")
+		host = substr(credentials["uri"], i + 3)
+		i = index(host, "/")
+		path = substr(host, i)
+		host = substr(host, 1, i - 1)
+
+		if (params_str && (credentials["method"] == "GET"))
+			path = path "?" params_str
+
+		c_header =	"GET " path " HTTP/1.1\n" \
+				"User-Agent: twitter.awk/1.0\n" \
+				"Host: " host "\n" \
+				header "\n\n" \
+				"__EOF__\n"
+
+		cmd =	"openssl s_client -quiet -connect " host ":443 " \
+			(fifo?(">" fifo):"") " <<__EOF__\n" c_header
+
+		# couldn't for the live of me just read the headers off the fifo
+		# before awk opens it as an ARGV file without it gobbling up
+		# too much. must be buffer size. this should read char-by-char
+		# to get a LINE and THAT IS IT and leave my CONTENT ALONE!
+		if (fifo) {
+			print "" | cmd	# kick it off
+			h_cmd = "while read A && [ \"${#A}\" -gt 2 ]; do echo \"${A}\"; done < " fifo
+			while ((h_cmd | getline) > 0 && http_get_header(cmd)) {
+				if ($0 ~ /chunked/) __chunked = 1
+			}
+			verbose_print(3, "close header helper.")
+			close(h_cmd)	# awk reopens as ARGV[1] for normal procsesing
+
+		} else {
+			# i'll have to pretty this up later.
+			# same code 3 times? ick
+			while ((cmd | getline) > 0 && http_get_header(cmd)) {
+				if ($0 ~ /chunked/) __chunked = 1
+			}
+		}
+	} else {
+		cmd =	"exec curl -D - -s -N '" credentials["uri"] \
+			"' -H '" header "'"
+		if (params_str)
+			cmd = cmd " -d '" params_str "'"
+		if (fifo)
+			cmd = cmd " -o " fifo
+		# gobber header, always on stdout
+		while ((cmd | getline) > 0  && http_get_header(cmd)) {
+			# null
+		}
+	}
+
+	verbose_print(1, "HTTP command: [" cmd "]")
+	return cmd
 }
 
 ###############################################################################
@@ -772,7 +845,13 @@ function conv_unicode_to_utf8(hex, arr,
 function check_required_cmds(	cmds, i, cmd, line, some_missing)
 {
 	## we need all of these...
-	cmds["date"] = cmds["curl"] = cmds["which"] = 0
+	cmds["date"] = cmds["which"] = 0
+	if (__conf["cmd", "http"] == "openssl") {
+		cmds["openssl"] = 0
+		cmds["cat"] = 0
+	} else {
+		cmds["curl"] = 0
+	}
 
 	for (i in cmds) cmd = cmd " " i
 	cmd = "which" cmd " 2>/dev/null"
@@ -793,7 +872,9 @@ function check_required_cmds(	cmds, i, cmd, line, some_missing)
 				      "* ERROR: Missing the following required programs: *"
 			}
 			printf("* %-47s *\n", i)
-		}
+		} else
+			verbose_print(3, "Command [" i "] available at [" \
+				cmds[i] "]")
 	}
 	if (some_missing) {
 		print "***************************************************\n"
@@ -809,7 +890,7 @@ function mkfifo(arr, template,
 		template = "twitter.fifo"
 	devnull = " >/dev/null 2>&1"
 	cmd = "unlink " template devnull "; mkfifo -m 600 " template devnull \
-		"; printf '%d\n%s' $? " template
+		"; printf '%d\n%s\n' $? " template
 	cmd | getline exitcode
 	cmd | getline arr[0]
 	close(cmd)
