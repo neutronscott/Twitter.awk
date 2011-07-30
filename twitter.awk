@@ -1,30 +1,12 @@
 #!/usr/bin/nawk -f
 # twitter.awk: twitter client for streaming api.
 #
-# 30110726: tested in Solaris nawk. split() doesn't work on null
-#           terminator. back to using substr(s, i, 1). also delete arr
-#           needs a loop: for (i in arr) delete arr[i]
-# 20110726: Really getting somewhere. Started 3 days ago. Exported
-#           'sha1sum', 'base64', and 'urlencode' functions to allow
-#           use/test on files/stdin. sha1sum/base64 output mimics the
-#           normal shell utilities :)
-#
-# I tried to organize my mind and split functions into groups
-#  twitter_ - not much yet...
-#     html_ - html specific encodings
-#     json_ - json parser
-#    oauth_ - OAuth, i made it all 1 function, =( still mostly generic
-#     conv_ - numeric conversions
-#      misc - just mkfifo
-#     sha1_ - sha1 functions, operations with binary strings! *SLOW* heh
-# quicksort - someone elses sort function
-#
 # all code my own except quicksort.. might just use a lil bubblesort,
 #  it overkill for just the few oauth_ and post params sorting...
 #
 # license: SHOULD shoot me an email if you use it, MUST buy me a beer
 #          if we meet. ;)
-# july 2011. scott nicholas <neutronscott@scottn.us>
+# born july 23, 2011. scott nicholas <neutronscott@scottn.us>
 
 BEGIN {
 	__configfile	= "twitter.conf"
@@ -79,28 +61,21 @@ __mode == "json"      {
 1 { gsub("\r", "") }
 __chunked {
 	content = ""
-	c_length = j = c_read = __chunked_overread = 0
+	c_length = j = c_read = 0
 
 	# maybe needa add conv_hex2dec now eh?
 	for (i = length($0); i > 0; i--)
 		c_length = c_length + ((16^(j++)) * __hex2dec[toupper(substr($0, i, 1))])
 
-	printf("Chunk-Length: [hex:%s] [dec:%d]\n", $0, c_length)
+	verbose_print(3, "Chunk-Length: [hex:" $0 "] [dec:" c_length "]")
 	# content read, and contents length. remember \n is missing, +1
 	while (c_read < c_length) {
 		getline line
 		c_read = c_read + 1 + length(line)
-		if (c_read > c_length) __chunked_overread = c_read - c_length
-		printf("c_read = %d/%d [overread:%d]\n", c_read, c_length, \
-			__chunked_overread)
-		content = content line "\n"
-		if (__chunked_overread)
-		{
-			printf("OVER: %s\n", substr(content, c_length))
-		}
+		verbose_print(3, "c_read = " c_read "/" c_length);
+		content = content (content ? "\n" : "") line
 	}
 	getline line		# [size]CRLF[data]CRLF.
-	print ""
 	$0 = content
 	gsub("\r", "")
 }
@@ -556,7 +531,10 @@ function http_open(credentials, header, params, fifo,
 			print "" | cmd	# kick it off
 			h_cmd = "while read A && [ \"${#A}\" -gt 2 ]; do echo \"${A}\"; done < " fifo
 			while ((h_cmd | getline) > 0 && http_get_header(cmd)) {
-				if ($0 ~ /chunked/) { __chunked = 1 }
+				verbose_print(3, "header: " $0);
+				if (tolower($1) == "transfer-encoding:" &&
+				    $2 == "chunked")
+					__chunked = 1
 			}
 			verbose_print(3, "close header helper.")
 			close(h_cmd)	# awk reopens as ARGV[1] for normal procsesing
