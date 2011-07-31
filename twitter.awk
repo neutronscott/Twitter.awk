@@ -65,7 +65,8 @@ __chunked {
 
 	# maybe needa add conv_hex2dec now eh?
 	for (i = length($0); i > 0; i--)
-		c_length = c_length + ((16^(j++)) * __hex2dec[toupper(substr($0, i, 1))])
+		c_length = c_length + \
+			((16^(j++)) * __hex2dec[toupper(substr($0, i, 1))])
 
 	verbose_print(3, "Chunk-Length: [hex:" $0 "] [dec:" c_length "]")
 	# content read, and contents length. remember \n is missing, +1
@@ -113,21 +114,21 @@ NR == 1 {
 
 	json_to_array($0, json)
 
-	if (json["text"])
-	{
-		text = html_entity_decode(json["text"])
-		printf("@%s: %s\n", json["user,screen_name"], text);
-		if (tolower(text) ~ /^@neutronbot .*(hi|hello)/) {
-			reply = "@" json["user,screen_name"] " why, hello to you too!"
-			print ">> " reply
-			twitter_update_status(oauth, reply)
-		} else if (json["user,screen_name"] != "neutronscott")
-			next # privledged commands follow
-		else if (tolower(text) ~ /^@neutronbot say /) {
-			reply = substr(text, 17)
-			print ">> " reply
-			twitter_update_status(oauth, reply)
-		}
+	if (!json["text"])	# save indent level
+		next		# is only OK because we're last action block.
+
+	text = html_entity_decode(json["text"])
+	printf("@%s: %s\n", json["user,screen_name"], text);
+	if (tolower(text) ~ /^@neutronbot .*(hi|hello)/) {
+		reply = "@" json["user,screen_name"] " why, hello to you too!"
+		print ">> " reply
+		twitter_update_status(oauth, reply)
+	} else if (json["user,screen_name"] != "neutronscott") {
+		next # privledged commands follow
+	} else if (tolower(text) ~ /^@neutronbot say /) {
+		reply = substr(text, 17)
+		print ">> " reply
+		twitter_update_status(oauth, reply)
 	}
 }
 
@@ -523,7 +524,7 @@ function http_open(credentials, header, params, fifo,
 		cmd =	"openssl s_client -quiet -connect " host ":443 " \
 			(fifo?(">" fifo):"") " <<__EOF__\n" c_header
 
-		# couldn't for the live of me just read the headers off the fifo
+		# couldn't for the life of me just read the headers off the fifo
 		# before awk opens it as an ARGV file without it gobbling up
 		# too much. must be buffer size. this should read char-by-char
 		# to get a LINE and THAT IS IT and leave my CONTENT ALONE!
@@ -531,19 +532,19 @@ function http_open(credentials, header, params, fifo,
 			print "" | cmd	# kick it off
 			h_cmd = "while read A && [ \"${#A}\" -gt 2 ]; do echo \"${A}\"; done < " fifo
 			while ((h_cmd | getline) > 0 && http_get_header(cmd)) {
-				verbose_print(3, "header: " $0);
 				if (tolower($1) == "transfer-encoding:" &&
 				    $2 == "chunked")
 					__chunked = 1
 			}
 			verbose_print(3, "close header helper.")
 			close(h_cmd)	# awk reopens as ARGV[1] for normal procsesing
-
 		} else {
 			# i'll have to pretty this up later.
 			# same code 3 times? ick
 			while ((cmd | getline) > 0 && http_get_header(cmd)) {
-				if ($0 ~ /chunked/) { __chunked = 1 }
+				if (tolower($1) == "transfer-encoding:" &&
+				    $2 == "chunked")
+					__chunked = 1
 			}
 		}
 	} else {
@@ -558,8 +559,10 @@ function http_open(credentials, header, params, fifo,
 			# null
 		}
 	}
-
-	verbose_print(1, "HTTP command: [" cmd "]")
+	# openssl cmd is long. hanging-indent it.
+	i = cmd
+	gsub("\n", "\n    ", i)
+	verbose_print(1, "HTTP command: [" i "]")
 	return cmd
 }
 
@@ -753,6 +756,7 @@ function conv_init(	i, j, c, h, a)
 function conv_base64(t,
 	i, b64, b, res)
 {
+	if (!__conv_init) conv_init()
 	b64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
 
 	# pad input. takes 6 bits to make 64-positions.
@@ -760,13 +764,14 @@ function conv_base64(t,
 		t = t "0"
 
 	for (i = 1; i < length(t); i += 6) {
+		# 6-bit (2^6 = 64) to decimal. then indexed to 'b64' array.
 		d  = 16 * __bin2dec["00" substr(t, i, 2)] + \
 		     __bin2dec[substr(t, i+2, 4)]
 		b = substr(b64, d + 1, 1)
 		res = res b
 	}
 
-	# pad out. end with '='. every 3 char transforms to 4, so output
+	# pad output. end with '='. every 3 char transforms to 4, so output
 	# must be multiple of 4.
 	while (length(res) % 4)
 		res = res "="
@@ -851,7 +856,6 @@ function check_required_cmds(	cmds, i, cmd, line, some_missing)
 	cmds["date"] = cmds["which"] = 0
 	if (__conf["cmd", "http"] == "openssl") {
 		cmds["openssl"] = 0
-		cmds["cat"] = 0
 	} else {
 		cmds["curl"] = 0
 	}
@@ -883,6 +887,15 @@ function check_required_cmds(	cmds, i, cmd, line, some_missing)
 		print "***************************************************\n"
 		exit
 	}
+
+	## see if they behave correctly?
+	cmd = "date +%s"
+	cmd | getline
+	if ($0 !~ /^[0123456789]+$/) {
+		print "*** ERROR: 'date' doesn't output unix timestamp!"
+		exit
+	}
+	close(cmd)
 }
 
 # use arr to pass by reference ...
@@ -1051,11 +1064,11 @@ function sha1sum(str,
 	h0, h1, h2, h3, h4, a, b, c, d, e,
 	i, j, len, pad, padded_length, chunk, w)
 {
-	h0 = "01100111010001010010001100000001"
-	h1 = "11101111110011011010101110001001"
-	h2 = "10011000101110101101110011111110"
-	h3 = "00010000001100100101010001110110"
-	h4 = "11000011110100101110000111110000"
+	h0 = "01100111010001010010001100000001"	#0x67452301
+	h1 = "11101111110011011010101110001001"	#0xEFCDAB89
+	h2 = "10011000101110101101110011111110"	#0x98BADCFE
+	h3 = "00010000001100100101010001110110"	#0x10325476
+	h4 = "11000011110100101110000111110000"	#0xC3D2E1F0
 
 	if (str ~ /[^01]/)
 		bin = conv_hex2bin(conv_str2hex(str))
@@ -1089,7 +1102,8 @@ function sha1sum(str,
 		# extend into 80 words
 		for (j = 16; j <= 79; j++) {
 			# w[j-3] ^ w[j-8] ^ w[j-14] ^ w[j-16]
-			w[j] = sha1_xor(sha1_xor(sha1_xor(w[j-3], w[j-8]), w[j-14]), w[j-16])
+			w[j] = sha1_xor(sha1_xor(sha1_xor(w[j-3], w[j-8]), \
+				w[j-14]), w[j-16])
 			# << 1
 			w[j] = substr(w[j], 2) substr(w[j], 1, 1)
 		}
@@ -1100,25 +1114,32 @@ function sha1sum(str,
 		for (j = 0; j <= 79; j++) {
 			if (j <= 19) {
 				# f = (b & c) | (!b & d)
-				f = sha1_or(sha1_and(b,c),sha1_and(sha1_not(b), d))
+				f = sha1_or(sha1_and(b,c),sha1_and(\
+					sha1_not(b), d))
+				# 0x5A827999
 				k = "01011010100000100111100110011001"
 			} else if (j <= 39) {
 				# f = b ^ c ^ d
 				f = sha1_xor(sha1_xor(b,c),d)
+				# 0x6ED9EBA1
 				k = "01101110110110011110101110100001"
 			} else if (j <= 59) {
 				# f = (b & c) | (b & d) | (c & d)
-				f = sha1_or(sha1_and(b,c),sha1_or(sha1_and(b,d),sha1_and(c,d)))
+				f = sha1_or(sha1_and(b,c),sha1_or(\
+					sha1_and(b,d),sha1_and(c,d)))
+				# 0x8F1BBCDC
 				k = "10001111000110111011110011011100"
 			} else {
 				# f = b ^ c ^ d
 				f = sha1_xor(sha1_xor(b,c),d)
+				# 0xCA62C1D6
 				k = "11001010011000101100000111010110"
 			}
 
 			# temp = (a<<5) + f + e + k + w[j]
 			temp = substr(a, 6) substr(a, 1, 5)
-			temp = sha1_add(sha1_add(temp,f),sha1_add(sha1_add(e,k),w[j]))
+			temp = sha1_add(sha1_add(temp,f),sha1_add(\
+				sha1_add(e,k),w[j]))
 			e = d
 			d = c
 			c = substr(b, 31) substr(b, 1, 30)	# b << 30
@@ -1126,10 +1147,10 @@ function sha1sum(str,
 			a = temp
 
 			if (__debug)
-			printf("t=%2d: %8s %8s %8s %8s %8s\n", j,\
-				conv_bin2hex(a),conv_bin2hex(b),\
-				conv_bin2hex(c),conv_bin2hex(d),\
-				conv_bin2hex(e))
+				printf("t=%2d: %8s %8s %8s %8s %8s\n", j,\
+					conv_bin2hex(a),conv_bin2hex(b),\
+					conv_bin2hex(c),conv_bin2hex(d),\
+					conv_bin2hex(e))
 		}
 		h0 = sha1_add(h0, a)
 		h1 = sha1_add(h1, b)

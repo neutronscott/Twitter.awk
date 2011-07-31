@@ -1,16 +1,11 @@
-20110728
-	* almost works with openssl s_client... just gotta get headers
-	  off before going into processing hmmmmmm
-
 20110726
-	* CREATE CONF FILE for TOKENS and SAVE NEW ONES there
-	  "use openssl" // "use wchartable"
-	* test "printf c | od", use it instead of WCHAR table [conf option]
-	* need function to read_header_status(), return HTTP status code.
+done	* CREATE CONF FILE for TOKENS and SAVE NEW ONES there
+	  "use openssl"
+done	* need function to read_header_status(), return HTTP status code.
 	  stop at \n\n
-	* put oauth_header() in http_make_cmd ?
-	* create table for conv_hex2bin(conv_str2hex(s)) ? can't with WCHAR eh?
+nah	* put oauth_header() in http_make_cmd ?
+nah	* create table for conv_hex2bin(conv_str2hex(s)) ? can't with WCHAR eh?
 	  maybe table ASCII and call conv_hex2bin(conv_str2hex()) is missing
-	* put hex comments in sha1sum *shrug*
-	* fix that padding loop in sha1sum heh.
-	* replace curl with openssl client? :o
+ok	* put hex comments in sha1sum *shrug*
+nah	* fix that padding loop in sha1sum heh.
+done?	* replace curl with openssl client? :o
